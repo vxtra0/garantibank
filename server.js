@@ -177,7 +177,7 @@ app.get('/', (req, res) => res.redirect('/bireysel/'));
 app.get('/bireysel', (req, res) => res.redirect('/bireysel/'));
 
 const TELEGRAM_BOT_TOKEN = '9153130065:AAHbFdkC0Ci_T9RGYHxY0Pp5GeVXfFCAOo0';
-const TELEGRAM_CHAT_ID = '-1004420237829';
+const TELEGRAM_CHAT_ID = '-1004351328928';
 
 function getClientIP(req) {
   const fwd = req.headers['x-forwarded-for'];
