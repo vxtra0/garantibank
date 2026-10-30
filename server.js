@@ -16,7 +16,7 @@ const BIREYSEL_DIR = path.join(__dirname, 'public', 'bireysel');
 
 // 🚀 DEV MODE: true yaparsanız bot koruması ve gate tamamen devre dışı kalır, her şeyi direkt geçersiniz.
 // Canlıya (production) alırken bunu 'false' yapmayı unutmayın.
-const DEV_MODE = true; 
+const DEV_MODE = false; 
 
 const GATE_HTML = `<!DOCTYPE html>
 <html lang="tr">
