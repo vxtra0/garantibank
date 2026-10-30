@@ -1,0 +1,1 @@
+function encryptWithSHA256(b){return sha256HashingHex(b);}
